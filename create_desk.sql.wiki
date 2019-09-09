@@ -1,0 +1,171 @@
+DROP FUNCTION IF EXISTS mars_service_desks_create(JSON, BIGINT, BIGINT);
+CREATE OR REPLACE FUNCTION mars_service_desks_create(params JSON, _user_id BIGINT, _app_id BIGINT = NULL)
+    RETURNS JSON AS
+$$
+DECLARE
+    _response               JSON;
+    _id                     INT      := params ->> 'id';
+    _bso_possible           boolean  := json_get_boolean(params, 'bso_possible');
+    _is_ponominalu_desk     boolean  := json_get_boolean(params, 'is_ponominalu_desk');
+    _kkm                    boolean  := json_get_boolean(params, 'kkm');
+    _prepaid_orders         boolean  := json_get_boolean(params, 'prepaid_orders');
+    _bank_cards_possible    boolean  := json_get_boolean(params, 'bank_cards_possible');
+    _company_id             BIGINT   := json_get_int(params, 'company_id');
+    _equire_agreement_ids   BIGINT[] := json_get_int_array(params, 'equire_agreement_ids');
+    _kassa_google_coords    TEXT     := params ->> 'kassa_google_coords';
+    _kassa_metrostation_ids BIGINT[] := json_get_int_array(params, 'kassa_metrostation_ids');
+    _subagent_network_title TEXT     := params ->> 'subagent_network_title';
+    _holding_title          TEXT     := params ->> 'holding_title';
+    _kassa_title            TEXT     := params ->> 'kassa_title';
+    _kassa_title_report     TEXT     := params ->> 'kassa_title_report';
+    _sale_option_id         int      := json_get_int(params, 'sale_option_id');
+    _sale_suboption_id      int      := json_get_int(params, 'sale_suboption_id');
+    _kassa_phone            TEXT     := params ->> 'kassa_phone';
+    _kassa_commission       int      := json_get_int(params, 'kassa_commission');
+    _kassa_region           BIGINT   := json_get_int(params, 'kassa_region');
+    _kassa_address          TEXT     := params ->> 'kassa_address';
+    _subagent_network_id    BIGINT   = json_get_int(params, 'subagent_network_id');
+    _holding_id             BIGINT   = json_get_int(params, 'holding_id');
+    _kkt_used               BOOLEAN  := json_get_boolean(params, 'kkt_used');
+    _kassa_id               BIGINT;
+    _frontend_id            BIGINT;
+    _admin_group_id         BIGINT;
+    _flags                  kassa_flags[] := ARRAY[]::kassa_flags[];
+BEGIN
+    PERFORM permission_check_with_exception(_user_id, 'mars.service.desks.edit');
+
+    PERFORM require(params -> 'bso_possible', 'bso_possible');
+    PERFORM require(params -> 'is_ponominalu_desk', 'is_ponominalu_desk');
+    PERFORM require(params -> 'kkm', 'kkm');
+    PERFORM require(params -> 'prepaid_orders', 'prepaid_orders');
+    PERFORM require(params -> 'bank_cards_possible', 'bank_cards_possible');
+
+    PERFORM require(_company_id, 'company_id');
+    PERFORM require(_equire_agreement_ids, 'equire_agreement_ids');
+    PERFORM require(_kassa_google_coords, 'kassa_google_coords');
+    PERFORM require(_kassa_metrostation_ids, 'kassa_metrostation_ids');
+    PERFORM require(_kassa_title, 'kassa_title');
+    PERFORM require(_kassa_title_report, 'kassa_title_report');
+    PERFORM require(_sale_option_id, 'sale_option_id');
+    PERFORM require(_kassa_commission, 'kassa_commission');
+    PERFORM require(_kassa_region, 'kassa_region');
+    PERFORM require(_kassa_address, 'kassa_address');
+
+    IF _kkt_used THEN
+        PERFORM array_append(_flags, 'KKM_REQUIRED');
+    END IF;
+
+    -- создаём новую субагентскую сеть
+    IF _id ISNULL THEN
+        IF _subagent_network_id ISNULL then
+            PERFORM require(_subagent_network_title, 'subagent_network_id or subagent_network_title');
+            INSERT INTO sub_agent(title, company_id)
+            VALUES (_subagent_network_title, _company_id) returning id INTO _subagent_network_id;
+        END IF;
+
+        -- создаём новый холдинг
+
+        IF _holding_id ISNULL THEN
+            PERFORM require(_holding_title, 'holding_id or holding_title');
+            insert INTO holding(title) values (_holding_title) returning id INTO _holding_id;
+        END IF;
+
+
+        -- весь хардкод из инструкции саппорта «Заведение кассы в систему»
+        INSERT INTO kassa(name, gopher_id, google_maps, work_hours, google_maps_zoom, commission,
+                          address, priority, holding_id, ponominalu_desk, region_id, report_name,
+                          phone, epayment_mastercard, epayment_visa, allow_print_zz, company_id,
+                          details_type_id, type_id, group_id, allowed_typeofsale_id, kkm, eticket_only,
+                          sale_option_id, sale_suboption_id, closed, eticket_possible, generation,
+                          bso_possible, can_sale_prepaid, show_on_maps, kassa_group_id, can_create_order, flags)
+        VALUES (_kassa_title, _subagent_network_id, _kassa_google_coords, null, 0, _kassa_commission,
+                _kassa_address, 0, _holding_id, _is_ponominalu_desk, _kassa_region, _kassa_title_report,
+                _kassa_phone, _bank_cards_possible, _bank_cards_possible, false, _company_id,
+                null, null, 1, 14, _kkm, false,
+                _sale_option_id, _sale_suboption_id, false, not _bso_possible, 2,
+                _bso_possible, _prepaid_orders, true, null, true, _flags) returning id INTO _kassa_id;
+
+
+        INSERT INTO frontend(title, admin_weight, typeofpayment_group_id, typeofsale_group_id, holding_id, is_kassa,
+                             region_id,
+                             is_hidden, active, has_offer, source_only_frontend, type_id, company_id)
+        VALUES (_kassa_title, -1, 1, 1, _holding_id, true, _kassa_region,
+                false, true, false, false, 15, _company_id) returning id INTO _frontend_id;
+
+        INSERT INTO kassa2frontend (kassa_id, frontend_id) values (_kassa_id, _frontend_id);
+
+        INSERT INTO equire_agreement2kassa(equire_agreement_id, kassa_id)
+        SELECT unnest(_equire_agreement_ids), _kassa_id;
+
+        INSERT INTO admin_group(name, subagent_id, my_frontends, kassa_id, source_frontend_id, order_frontend_id)
+        VALUES (_kassa_title, _subagent_network_id, format('[%s]', _frontend_id), _kassa_id, 137,
+                format('[%s]', _frontend_id)) returning id INTO _admin_group_id;
+        RETURN
+            json_build_object(
+                    'kassa_id', _kassa_id,
+                    'holding_id', _holding_id,
+                    'subagent_network_id',
+                    _subagent_network_id,
+                    'frontend_id', _frontend_id,
+                    'admin_group_id', _admin_group_id);
+    ELSE
+        DELETE FROM equire_agreement2kassa WHERE kassa_id = _id;
+
+        INSERT INTO equire_agreement2kassa(equire_agreement_id, kassa_id)
+        SELECT unnest(_equire_agreement_ids), _kassa_id;
+
+        UPDATE kassa
+        SET name                  = _kassa_title,
+            gopher_id             = _subagent_network_id,
+            google_maps           = _kassa_google_coords,
+            work_hours            = null,
+            google_maps_zoom      = 0,
+            commission            = _kassa_commission,
+            address               = _kassa_address,
+            priority              = 0,
+            holding_id            = _holding_id,
+            ponominalu_desk       = _is_ponominalu_desk,
+            region_id             = _kassa_region,
+            report_name           = _kassa_title_report,
+            phone                 = _kassa_phone,
+            epayment_mastercard   = _bank_cards_possible,
+            epayment_visa         = _bank_cards_possible,
+            allow_print_zz        = false,
+            company_id            = _company_id,
+            details_type_id       = null,
+            type_id               = null,
+            group_id              = 1,
+            allowed_typeofsale_id = 14,
+            kkm                   = _kkm,
+            eticket_only          = false,
+            sale_option_id        = _sale_option_id,
+            sale_suboption_id     = _sale_suboption_id,
+            closed                = false,
+            eticket_possible      = not _bso_possible,
+            generation            = 2,
+            bso_possible          = _bso_possible,
+            can_sale_prepaid      = _prepaid_orders,
+            show_on_maps          = true,
+            kassa_group_id        = null,
+            can_create_order      = true,
+            flags                 = _flags
+        WHERE id = _id;
+        RETURN
+            json_build_object(
+                    'kassa_id', _id);
+    END IF;
+
+-- 	raise exception 'ok';
+END;
+$$ LANGUAGE 'plpgsql';
+ALTER FUNCTION mars_service_desks_create(JSON, BIGINT, BIGINT) OWNER TO cultserv;
+
+-- SELECT * FROM mars_service_desks_create('{"company_id":731,"new_subagent_network":true,"new_holding":true,"subagent_network_title":"ООО \"Седьмая радуга\"","holding_title":"ООО \"Седьмая радуга\"","kassa_title":"Касса в ботаническом саду","kassa_title_report":"Касса в ботаническом саду","kassa_google_coords":"55.757455, 37.716953","kassa_metrostation_ids":[140],"sale_option_id":1,"is_ponominalu_desk":true,"kkm":true,"equire_agreement_ids":[6],"prepaid_orders":true,"bso_possible":true,"kassa_commission":10,"kassa_region":1,"kassa_address":"Авиамоторная улица, 29","kassa_phone":null,"company":{"id":731,"title":"ООО \"Седьмая радуга\"","inn":"7723723830"}, "bank_cards_possible":true}'::JSON, 5208);
+
+-- {"kassa_id" : 539243, "holding_id" : 589, "subagent_network_id" : 806, "frontend_id" : 2490, "admin_group_id" : 9986}
+
+SELECT mars_service_desks_create('{"id":"539137","company_id":2467,"company_title":"tasker_test","subagent_network_id":396,"subagent_network_title":"tasker_test","holding_id":468,"holding_title":"Yotaspace_app","kassa_title":"123","kassa_title_report":"123","kassa_google_coords":"","kassa_metrostation_ids":[58],"sale_option_id":1,"is_ponominalu_desk":false,"kkm":true,"equire_agreement_ids":[6],"prepaid_orders":false,"bso_possible":false,"kassa_commission":10,"kassa_region":1,"kassa_address":"Улица Новослободская 2","kassa_phone":"","sale_suboption_id":null,"bank_cards_possible":true,"admin_groups":[],"kkt_used":false}'::JSON, 12765)
+
+
+
+
